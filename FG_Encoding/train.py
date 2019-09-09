@@ -11,8 +11,8 @@ import time
 import torch
 import torchvision
 import torch.nn as nn
-from FG_baseline import cub200 as cub200, ft_model
-from FG_baseline import utils
+from FG_Encoding import cub200 as cub200, ft_model
+from FG_Encoding import utils
 
 
 # mport model as model
@@ -59,11 +59,12 @@ class FGTtrain(object):
             state_dict = torch.load(LOAD_MODEL)
             self._net.load_state_dict(state_dict['state_dict'])
         else:
+            #print(None)
             self._net = ft_model.Model()
         # self._net = self._net.cuda()
 
         print('net loading!----finished!')
-        # print(self._net)
+        print(self._net)
 
         resize_size = 256
         crop_size = 224
@@ -83,22 +84,6 @@ class FGTtrain(object):
                                              std=(0.229, 0.224, 0.225)),
         ])
 
-        # Data.
-        # NOTE: Resize such that the short edge is 448, and then ceter crop 448.
-        # train_transforms = torchvision.transforms.Compose([
-        #     torchvision.transforms.Resize(size=(448, 448)),
-        #     # torchvision.transforms.CenterCrop(size=448),
-        #     torchvision.transforms.ToTensor(),
-        #     torchvision.transforms.Normalize(mean=(0.485, 0.456, 0.406),
-        #                                      std=(0.229, 0.224, 0.225))
-        # ])
-        # test_transforms = torchvision.transforms.Compose([
-        #     torchvision.transforms.Resize(size=(448, 448)),
-        #     # torchvision.transforms.CenterCrop(size=448),
-        #     torchvision.transforms.ToTensor(),
-        #     torchvision.transforms.Normalize(mean=(0.485, 0.456, 0.406),
-        #                                      std=(0.229, 0.224, 0.225))
-        # ])
         train_data = cub200.CUB200(
             root=self._paths['cub200'], train=True, transform=train_transforms,
             download=False)
@@ -113,10 +98,11 @@ class FGTtrain(object):
 
         self._criterion = nn.CrossEntropyLoss()
 
-        self._fc_2 = list(map(id, self._net.fc_2.parameters()))
-        self._fc_1 = list(map(id, self._net.fc_1.parameters()))
-        self._no_fc = filter(lambda p: id(p) not in self._fc_1 + self._fc_2,
-                             self._net.parameters())
+        self._head = list(map(id, self._net.head.parameters()))
+        # self._fc_2 = list(map(id, self._net.fc_2.parameters()))
+        # self._fc_1 = list(map(id, self._net.fc_1.parameters()))
+        self._no_head = filter(lambda p: id(p) not in self._head,
+                               self._net.parameters())
 
         # self._optimizer = torch.optim.SGD([
         #     {'params': self._no_fc, 'lr': 1e-3},
@@ -124,15 +110,14 @@ class FGTtrain(object):
         #     momentum=0.9, weight_decay=1e-4)
 
         self._optimizer = torch.optim.SGD([
-            {'params': self._no_fc, 'lr': 1e-3},
-            {'params': self._net.fc_1.parameters(), 'lr': 1e-3 * 10},
-            {'params': self._net.fc_2.parameters(), 'lr': 1e-3 * 10}
+            {'params': self._no_head, 'lr': 1e-3},
+            {'params': self._net.head.parameters(), 'lr': 1e-3 * 10}
         ], momentum=0.9, weight_decay=1e-4)
 
         # print(len(self._optimizer[False].param_groups))
         # self._optimizer_0 = torch.optim.Adam(utils.gather_the_parameters(self._net, feature_extract=True), lr=1e-4,
         #                                      weight_decay=1e-5)
-        self._scheduler = torch.optim.lr_scheduler.StepLR(self._optimizer, step_size=30, gamma=0.1, last_epoch=-1)
+        #self._scheduler = torch.optim.lr_scheduler.StepLR(self._optimizer, step_size=30, gamma=0.1, last_epoch=-1)
         # self._scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         #     self._optimizer, mode='max', factor=0.1, patience=8, verbose=True,
         #     threshold=1e-4)
@@ -146,7 +131,7 @@ class FGTtrain(object):
         best_epoch = None
         print('Epoch\tTrain loss\tTrain acc\tTest acc\tTime')
         for t in range(100):
-            self._scheduler.step(t)
+            #self._scheduler.step(t)
             epoch_loss = []
             num_correct = 0
             num_total = 0
@@ -154,7 +139,7 @@ class FGTtrain(object):
             batch_num = 0
 
             if t == 0:
-                utils.set_parameter_requires_grad(self._net.fc_2.parameters(), requires_grad=True)
+                utils.set_parameter_requires_grad(self._net.head.parameters(), requires_grad=True)
                 utils.gather_the_parameters(self._net)
 
             else:
@@ -167,20 +152,16 @@ class FGTtrain(object):
                 # instances = instances.cuda()
                 # labels = labels.cuda()
 
-                instances = instances
-                labels = labels
-
                 # Forward pass.
-                fea_1, fea_2 = self._net(instances)
-                loss_1 = self._criterion(fea_1, labels)
-                loss_2 = self._criterion(fea_2, labels)
-                loss = (loss_1 + loss_2) / 2
+                fea = self._net(instances)
+                loss = self._criterion(fea, labels)
+
                 print('batch: {}        loss:{}'.format(batch_num, loss))
 
                 with torch.no_grad():
                     epoch_loss.append(loss.item())
                     # Prediction.
-                    prediction = torch.argmax(fea_2, dim=1)
+                    prediction = torch.argmax(fea, dim=1)
                     num_total += labels.size(0)
                     num_correct += torch.sum(prediction == labels).item()
 
@@ -192,7 +173,7 @@ class FGTtrain(object):
                 self._optimizer.zero_grad()
                 loss.backward()
                 self._optimizer.step()
-                del instances, labels, fea_1, fea_2, loss, prediction
+                del instances, labels, fea, loss, prediction
             train_acc = 100 * num_correct / num_total
             test_acc = self._accuracy(self._test_loader)
             if test_acc > best_acc:
@@ -210,11 +191,9 @@ class FGTtrain(object):
             # self._scheduler.step(test_acc)
         print('Best at epoch %d, test accuaray %4.2f' % (best_epoch, best_acc))
 
-
     def test(self):
         test_acc = self._accuracy(self._test_loader)
         print('test accuracy:{}'.format(test_acc))
-
 
     def _accuracy(self, data_loader):
         """Compute the train/test accuracy.
@@ -292,7 +271,7 @@ def main():
         'cub200': '/Users/peggytang/Downloads/CUB_200_2011/',
         'model': '/disks/disk0/tpq/datasets/CUB_200_2011/model/'
     }
-    #LOAD_MODEL = '/disks/disk0/tpq/bcnn_224_epoch_132.pth'
+    # LOAD_MODEL = '/disks/disk0/tpq/bcnn_224_epoch_132.pth'
     LOAD_MODEL = None
 
     # for d in paths:
@@ -306,7 +285,6 @@ def main():
         manager.test()
     else:
         manager.train()
-
 
 
 if __name__ == '__main__':
